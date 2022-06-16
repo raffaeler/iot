@@ -18,7 +18,7 @@ partial class Interop
     /// or passing by the libcamera interoperability layer functions
     /// that have the same functions with the same signature
     /// </summary>
-    internal class V4L2Helper
+    public class V4L2Helper
     {
         public static int ioctl(bool useCompatibilityLayer, int fd, int request, IntPtr argp)
         {

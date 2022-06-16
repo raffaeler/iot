@@ -21,6 +21,7 @@ namespace Iot.Device.Media
 
         private static readonly object s_initializationLock = new object();
 
+        private bool _useCompatibilityLayer = false;
         private int _deviceFileDescriptor = -1;
         private bool _capturing;
 
@@ -62,12 +63,12 @@ namespace Iot.Device.Media
             DevicePath = DefaultDevicePath;
         }
 
-        private static unsafe void UnmappingFrameBuffers(InteropVideodev2.V4l2FrameBuffer* buffers)
+        private unsafe void UnmappingFrameBuffers(InteropVideodev2.V4l2FrameBuffer* buffers)
         {
             // Unmapping the applied buffer to user space
             for (uint i = 0; i < BufferCount; i++)
             {
-                Interop.munmap(buffers[i].Start, (int)buffers[i].Length);
+                Interop.V4L2Helper.munmap(_useCompatibilityLayer, buffers[i].Start, (int)buffers[i].Length);
             }
         }
 
@@ -126,14 +127,14 @@ namespace Iot.Device.Media
             {
                 // Start data stream
                 InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                Interop.ioctl(_deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
+                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
                 while (!token.IsCancellationRequested)
                 {
                     NewImageBufferReady?.Invoke(this, GetFrameDataPooled(buffers));
                 }
 
                 // Close data stream
-                Interop.ioctl(_deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
+                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
 
                 UnmappingFrameBuffers(buffers);
             }
@@ -289,12 +290,12 @@ namespace Iot.Device.Media
             {
                 // Start data stream
                 InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                Interop.ioctl(_deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
+                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
 
                 byte[] dataBuffer = GetFrameData(buffers);
 
                 // Close data stream
-                Interop.ioctl(_deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
+                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
 
                 UnmappingFrameBuffers(buffers);
 
@@ -378,7 +379,7 @@ namespace Iot.Device.Media
                 V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QUERYBUF, ref buffer);
 
                 buffers[i].Length = buffer.length;
-                buffers[i].Start = Interop.mmap(IntPtr.Zero, (int)buffer.length, Interop.MemoryMappedProtections.PROT_READ | Interop.MemoryMappedProtections.PROT_WRITE, Interop.MemoryMappedFlags.MAP_SHARED, _deviceFileDescriptor, (int)buffer.m.offset);
+                buffers[i].Start = Interop.V4L2Helper.mmap(_useCompatibilityLayer, IntPtr.Zero, (int)buffer.length, Interop.MemoryMappedProtections.PROT_READ | Interop.MemoryMappedProtections.PROT_WRITE, Interop.MemoryMappedFlags.MAP_SHARED, _deviceFileDescriptor, (int)buffer.m.offset);
             }
 
             // Put the buffer in the processing queue
@@ -599,7 +600,7 @@ namespace Iot.Device.Media
                     return;
                 }
 
-                _deviceFileDescriptor = Interop.open(deviceFileName, Interop.FileOpenFlags.O_RDWR);
+                _deviceFileDescriptor = Interop.V4L2Helper.open(_useCompatibilityLayer, deviceFileName, Interop.FileOpenFlags.O_RDWR);
 
                 if (_deviceFileDescriptor < 0)
                 {
@@ -612,7 +613,7 @@ namespace Iot.Device.Media
         {
             if (_deviceFileDescriptor >= 0)
             {
-                Interop.close(_deviceFileDescriptor);
+                Interop.V4L2Helper.close(_useCompatibilityLayer, _deviceFileDescriptor);
                 _deviceFileDescriptor = -1;
             }
         }
@@ -630,7 +631,7 @@ namespace Iot.Device.Media
             IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(@struct));
             Marshal.StructureToPtr(@struct, ptr, true);
 
-            int result = Interop.ioctl(_deviceFileDescriptor, (int)request, ptr);
+            int result = Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, (int)request, ptr);
             @struct = Marshal.PtrToStructure<T>(ptr);
 
             Marshal.FreeHGlobal(ptr);
