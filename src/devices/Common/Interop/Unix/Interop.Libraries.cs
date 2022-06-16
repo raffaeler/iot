@@ -9,4 +9,5 @@ partial class Interop
 {
     private const string LibcLibrary = "libc";
     private const string AlsaLibrary = "libasound";
+    private const string V4L2CompatLibrary = "v4l2-compat";
 }
