@@ -48,4 +48,10 @@ partial class Interop
 
     [DllImport(LibcLibrary)]
     public static extern int munmap(IntPtr addr, int length);
+
+    [DllImport(LibcLibrary)]
+    public static unsafe extern byte* strerror(int errnum);
+
+    [DllImport(LibcLibrary)]
+    public static unsafe extern int strerror_r(int errnum, [Out] byte* buffer, int length);
 }

@@ -63,6 +63,89 @@ namespace Iot.Device.Media
             DevicePath = DefaultDevicePath;
         }
 
+        /// <summary>
+        /// This method returns true when the Libcamera stack is available
+        /// On the Raspberry PI it has been set as default starting from
+        /// the Raspbian OS version 11 (bullseye).
+        /// Verify the OS release from the terminal: lsb_release -a
+        /// </summary>
+        /// <param name="deviceFileName">The name of the device. For example /dev/video0</param>
+        /// <returns>True if the Libcamera stack is available, False on the V4L2 stack</returns>
+        /// <exception cref="IOException">The exception is thrown when no device is found or it does not comply to the standard video ioctls</exception>
+        public static bool IsLibcameraAvailable(string deviceFileName)
+        {
+            InteropVideodev2.v4l2_capability caps = new();
+
+            int fd = Interop.open(deviceFileName, Interop.FileOpenFlags.O_RDWR);
+            if (fd < 0)
+            {
+                throw new IOException($"Error {Marshal.GetLastWin32Error()}. Can not open video device file '{deviceFileName}'.");
+            }
+
+            IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf<InteropVideodev2.v4l2_capability>());
+            Marshal.StructureToPtr(caps, ptr, true);
+            int ret = Interop.ioctl(fd, InteropVideodev2.V4l2Request.VIDIOC_QUERYCAP, ptr);
+            if (fd < 0)
+            {
+                throw new IOException($"Error {Marshal.GetLastWin32Error()}. Failed to query parameters on '{deviceFileName}'. Verify from the terminal running: v4l2-ctl -D --device {deviceFileName}");
+            }
+
+            caps = Marshal.PtrToStructure<InteropVideodev2.v4l2_capability>(ptr);
+            Marshal.FreeHGlobal(ptr);
+
+            Interop.close(fd);
+            if (string.Compare(caps.driver, "unicam", false) == 0)
+            {
+#if DEBUG
+                Console.WriteLine($"Compatibility layer is available");
+#endif
+                return true;
+            }
+
+            /*
+                        if (string.Compare(caps.driver, "bm2835 mmal", false) == 0)
+                        {
+            #if DEBUG
+                            Console.WriteLine($"Compatibility layer is available");
+            #endif
+                            return true;
+                        }
+            */
+#if DEBUG
+            Console.WriteLine($"Compatibility layer is NOT available");
+#endif
+            return false;
+        }
+
+        private static unsafe void ThrowIfFailed(int ret,
+            [CallerMemberName] string memberName = "",
+            [CallerFilePath] string sourceFilePath = "",
+            [CallerLineNumber] int sourceLineNumber = 0)
+        {
+            if (ret < 0)
+            {
+                var errno = Marshal.GetLastWin32Error();
+
+                var errstring = Marshal.PtrToStringAnsi((IntPtr)Interop.strerror(errno));
+                /*
+                 * The function strerror_r apparently does return just an empty string
+
+                int bufferSize = 1024;
+                byte* chars = stackalloc byte[bufferSize];
+                string? errstring = Interop.strerror_r(errno, chars, bufferSize) == 0
+                    ? "-"
+                    : Marshal.PtrToStringAnsi((IntPtr)chars);
+                */
+
+                Console.WriteLine($"ioctl failed ({ret}) Error: {errno}: {errstring}" +
+                   Environment.NewLine + $"Method:{memberName}, source:{sourceFilePath}, line:{sourceLineNumber}");
+                /*
+                throw new System.IO.IOException($"ioctl failed ({ret}) Error: {errno}: {errstring}" +
+                    Environment.NewLine + $"Method:{memberName}, source:{sourceFilePath}, line:{sourceLineNumber}");
+                */
+            }
+        }
+
         private unsafe void UnmappingFrameBuffers(InteropVideodev2.V4l2FrameBuffer* buffers)
         {
             // Unmapping the applied buffer to user space
@@ -122,24 +205,30 @@ namespace Iot.Device.Media
 
         public override unsafe void CaptureContinuous(CancellationToken token)
         {
-            _capturing = true;
             fixed (InteropVideodev2.V4l2FrameBuffer* buffers = &ApplyFrameBuffers()[0])
             {
-                // Start data stream
-                InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
-                while (!token.IsCancellationRequested)
+                _capturing = true;
+                try
                 {
-                    NewImageBufferReady?.Invoke(this, GetFrameDataPooled(buffers));
+                    // Start data stream
+                    InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    ThrowIfFailed(Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type)));
+
+                    while (!token.IsCancellationRequested)
+                    {
+                        NewImageBufferReady?.Invoke(this, GetFrameDataPooled(buffers));
+                    }
+
+                    // Close data stream
+                    ThrowIfFailed(Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type)));
+
                 }
-
-                // Close data stream
-                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
-
-                UnmappingFrameBuffers(buffers);
+                finally
+                {
+                    UnmappingFrameBuffers(buffers);
+                    _capturing = false;
+                }
             }
-
-            _capturing = false;
         }
 
         public override void StopCaptureContinuous()
@@ -161,14 +250,14 @@ namespace Iot.Device.Media
             {
                 id = type
             };
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QUERYCTRL, ref query);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QUERYCTRL, ref query));
 
             // Get current value
             InteropVideodev2.v4l2_control ctrl = new InteropVideodev2.v4l2_control
             {
                 id = type,
             };
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_G_CTRL, ref ctrl);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_G_CTRL, ref ctrl));
 
             return new VideoDeviceValue(
                 type.ToString(),
@@ -288,16 +377,22 @@ namespace Iot.Device.Media
         {
             fixed (InteropVideodev2.V4l2FrameBuffer* buffers = &ApplyFrameBuffers()[0])
             {
-                // Start data stream
-                InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type));
+                byte[] dataBuffer = Array.Empty<byte>();
+                try
+                {
+                    // Start data stream
+                    InteropVideodev2.v4l2_buf_type type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    ThrowIfFailed(Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMON, new IntPtr(&type)));
 
-                byte[] dataBuffer = GetFrameData(buffers);
+                    dataBuffer = GetFrameData(buffers);
 
-                // Close data stream
-                Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type));
-
-                UnmappingFrameBuffers(buffers);
+                    // Close data stream
+                    ThrowIfFailed(Interop.V4L2Helper.ioctl(_useCompatibilityLayer, _deviceFileDescriptor, InteropVideodev2.V4l2Request.VIDIOC_STREAMOFF, new IntPtr(&type)));
+                }
+                finally
+                {
+                    UnmappingFrameBuffers(buffers);
+                }
 
                 return dataBuffer;
             }
@@ -311,7 +406,7 @@ namespace Iot.Device.Media
                 type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE,
                 memory = InteropVideodev2.v4l2_memory.V4L2_MEMORY_MMAP,
             };
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_DQBUF, ref frame);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_DQBUF, ref frame));
 
             // Get data from pointer
             IntPtr intptr = buffers[frame.index].Start;
@@ -319,7 +414,7 @@ namespace Iot.Device.Media
             Marshal.Copy(source: intptr, destination: dataBuffer, startIndex: 0, length: (int)buffers[frame.index].Length);
 
             // Requeue the buffer
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref frame);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref frame));
 
             return dataBuffer;
         }
@@ -332,7 +427,7 @@ namespace Iot.Device.Media
                 type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE,
                 memory = InteropVideodev2.v4l2_memory.V4L2_MEMORY_MMAP,
             };
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_DQBUF, ref frame);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_DQBUF, ref frame));
 
             // Get data from pointer
             IntPtr intptr = buffers[frame.index].Start;
@@ -350,7 +445,7 @@ namespace Iot.Device.Media
             Marshal.Copy(source: intptr, destination: dataBuffer, startIndex: 0, length: (int)buffers[frame.index].Length);
 
             // Requeue the buffer
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref frame);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref frame));
 
             return new NewImageBufferReadyEventArgs(dataBuffer, length);
         }
@@ -364,7 +459,7 @@ namespace Iot.Device.Media
                 type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE,
                 memory = InteropVideodev2.v4l2_memory.V4L2_MEMORY_MMAP
             };
-            V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_REQBUFS, ref req);
+            ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_REQBUFS, ref req));
 
             // Mapping the applied buffer to user space
             InteropVideodev2.V4l2FrameBuffer[] buffers = new InteropVideodev2.V4l2FrameBuffer[BufferCount];
@@ -376,7 +471,7 @@ namespace Iot.Device.Media
                     type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE,
                     memory = InteropVideodev2.v4l2_memory.V4L2_MEMORY_MMAP
                 };
-                V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QUERYBUF, ref buffer);
+                ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QUERYBUF, ref buffer));
 
                 buffers[i].Length = buffer.length;
                 buffers[i].Start = Interop.V4L2Helper.mmap(_useCompatibilityLayer, IntPtr.Zero, (int)buffer.length, Interop.MemoryMappedProtections.PROT_READ | Interop.MemoryMappedProtections.PROT_WRITE, Interop.MemoryMappedFlags.MAP_SHARED, _deviceFileDescriptor, (int)buffer.m.offset);
@@ -391,7 +486,7 @@ namespace Iot.Device.Media
                     type = InteropVideodev2.v4l2_buf_type.V4L2_BUF_TYPE_VIDEO_CAPTURE,
                     memory = InteropVideodev2.v4l2_memory.V4L2_MEMORY_MMAP
                 };
-                V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref buffer);
+                ThrowIfFailed(V4l2Struct(InteropVideodev2.V4l2Request.VIDIOC_QBUF, ref buffer));
             }
 
             return buffers;
@@ -599,6 +694,8 @@ namespace Iot.Device.Media
                 {
                     return;
                 }
+
+                _useCompatibilityLayer = IsLibcameraAvailable(deviceFileName);
 
                 _deviceFileDescriptor = Interop.V4L2Helper.open(_useCompatibilityLayer, deviceFileName, Interop.FileOpenFlags.O_RDWR);
 
