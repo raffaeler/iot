@@ -26,9 +26,6 @@ public class GpioController : IDisposable
     private const string RaspberryPi3Product = "Raspberry Pi 3";
     private const string RaspberryPi5Product = "Raspberry Pi 5";
 
-    private const string HummingBoardProduct = "HummingBoard-Edge";
-    private const string HummingBoardHardware = @"Freescale i.MX6 Quad/DualLite (Device Tree)";
-
     /// <summary>
     /// If a pin element exists, that pin is open. Uses current controller's numbering scheme
     /// </summary>
@@ -40,8 +37,26 @@ public class GpioController : IDisposable
     /// Initializes a new instance of the <see cref="GpioController"/> class that will use the logical pin numbering scheme as default.
     /// </summary>
     public GpioController()
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
         : this(PinNumberingScheme.Logical)
+#pragma warning restore CS0612
     {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="GpioController"/> class that will use the specified numbering scheme and driver.
+    /// </summary>
+    /// <param name="driver">The driver that manages all of the pin operations for the controller.</param>
+    public GpioController(GpioDriver driver)
+    {
+        _driver = driver;
+
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
+        NumberingScheme = PinNumberingScheme.Logical;
+#pragma warning restore CS0612
+
+        _openPins = new ConcurrentDictionary<int, PinValue?>();
+        _gpioPins = new ConcurrentDictionary<int, GpioPin>();
     }
 
     /// <summary>
@@ -49,6 +64,7 @@ public class GpioController : IDisposable
     /// </summary>
     /// <param name="numberingScheme">The numbering scheme used to represent pins provided by the controller.</param>
     /// <param name="driver">The driver that manages all of the pin operations for the controller.</param>
+    [Obsolete]
     public GpioController(PinNumberingScheme numberingScheme, GpioDriver driver)
     {
         _driver = driver;
@@ -62,6 +78,7 @@ public class GpioController : IDisposable
     /// The controller will default to use the driver that best applies given the platform the program is executing on.
     /// </summary>
     /// <param name="numberingScheme">The numbering scheme used to represent pins provided by the controller.</param>
+    [Obsolete]
     public GpioController(PinNumberingScheme numberingScheme)
         : this(numberingScheme, GetBestDriverForBoard())
     {
@@ -70,12 +87,20 @@ public class GpioController : IDisposable
     /// <summary>
     /// The numbering scheme used to represent pins provided by the controller.
     /// </summary>
+    [Obsolete]
     public PinNumberingScheme NumberingScheme { get; }
 
     /// <summary>
     /// The number of pins provided by the controller.
     /// </summary>
-    public virtual int PinCount => _driver.PinCount;
+    public virtual int PinCount
+    {
+        get
+        {
+            CheckDriverValid();
+            return _driver.PinCount;
+        }
+    }
 
     /// <summary>
     /// Returns the collection of open pins
@@ -95,7 +120,9 @@ public class GpioController : IDisposable
     /// <returns>The logical pin number in the controller's numbering scheme.</returns>
     protected virtual int GetLogicalPinNumber(int pinNumber)
     {
+#pragma warning disable CS0612 // PinNumberingScheme is obsolete
         return (NumberingScheme == PinNumberingScheme.Logical) ? pinNumber : _driver.ConvertPinNumberToLogicalNumberingScheme(pinNumber);
+#pragma warning restore CS0612
     }
 
     /// <summary>
@@ -112,7 +139,7 @@ public class GpioController : IDisposable
 
         OpenPinCore(pinNumber);
         _openPins.TryAdd(pinNumber, null);
-        _gpioPins[pinNumber] = new GpioPin(pinNumber, _driver);
+        _gpioPins[pinNumber] = new GpioPin(pinNumber, this);
         return _gpioPins[pinNumber];
     }
 
@@ -231,9 +258,18 @@ public class GpioController : IDisposable
     /// </summary>
     /// <param name="pinNumber">The pin number in the controller's numbering scheme.</param>
     /// <returns>The status if the pin is open or closed.</returns>
-    public bool IsPinOpen(int pinNumber)
+    public virtual bool IsPinOpen(int pinNumber)
     {
+        CheckDriverValid();
         return _openPins.ContainsKey(pinNumber);
+    }
+
+    private void CheckDriverValid()
+    {
+        if (_driver == null)
+        {
+            throw new ObjectDisposedException(nameof(GpioController));
+        }
     }
 
     /// <summary>
@@ -244,6 +280,7 @@ public class GpioController : IDisposable
     /// <returns>The status if the pin supports the mode.</returns>
     public virtual bool IsPinModeSupported(int pinNumber, PinMode mode)
     {
+        CheckDriverValid();
         int logicalPinNumber = GetLogicalPinNumber(pinNumber);
         return _driver.IsPinModeSupported(logicalPinNumber, mode);
     }
@@ -497,7 +534,16 @@ public class GpioController : IDisposable
                 // For now, for Raspberry Pi 5, we'll use the LibGpiodDriver.
                 // We need to create a new driver for the Raspberry Pi 5,
                 // because the Raspberry Pi 5 uses an entirely different GPIO controller (RP1)
-                return new LibGpiodDriver(4);
+#pragma warning disable SDGPIO0001
+                var chips = LibGpiodDriver.GetAvailableChips();
+                // The RP1 chip reports 54 lines
+                GpioChipInfo? selectedChip = chips.FirstOrDefault(x => x.NumLines == 54);
+                if (selectedChip is null)
+                {
+                    throw new NotSupportedException("Couldn't find the default GPIO chip. You might need to create the LibGpiodDriver explicitly");
+                }
+#pragma warning restore SDGPIO0001
+                return new LibGpiodDriver(selectedChip.Id);
 
             default:
 
@@ -532,13 +578,8 @@ public class GpioController : IDisposable
             return new RaspberryPi3Driver();
         }
 
-        if (baseBoardProduct == HummingBoardProduct || baseBoardProduct.StartsWith($"{HummingBoardProduct} "))
-        {
-            return new HummingBoardDriver();
-        }
-
         // Default for Windows IoT Core on a non-specific device
-        return new Windows10Driver();
+        throw new PlatformNotSupportedException();
     }
 
     /// <summary>

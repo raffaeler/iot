@@ -26,5 +26,40 @@ namespace Nmea.Simulator
             get;
             set;
         }
+
+        [Option("debug", Default = false, HelpText = "Wait for debugger on startup")]
+        public bool Debug
+        {
+            get;
+            set;
+        }
+
+        [Option('v', "verbose", Default = false, HelpText = "Show verbose log messages")]
+        public bool Verbose
+        {
+            get;
+            set;
+        }
+
+        [Option('l', "loop", HelpText = "Loop forever. Restarts playback at the beginning when at the end of the stream. Only useful together with --replay")]
+        public bool Loop
+        {
+            get;
+            set;
+        }
+
+        [Option("tcp", Default = 10110, HelpText = "TCP port to use")]
+        public int TcpPort
+        {
+            get;
+            set;
+        }
+
+        [Option("udp", Default = 10110, HelpText = "UDP port to use")]
+        public int UdpPort
+        {
+            get;
+            set;
+        }
     }
 }

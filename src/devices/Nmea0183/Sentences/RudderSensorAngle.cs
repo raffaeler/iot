@@ -46,7 +46,7 @@ namespace Iot.Device.Nmea0183.Sentences
         }
 
         /// <summary>
-        /// Date and time message (ZDA). This should not normally need the last time as argument, because it defines it.
+        /// Constructor that decodes a message.
         /// </summary>
         public RudderSensorAngle(TalkerId talkerId, IEnumerable<string> fields, DateTimeOffset time)
             : base(talkerId, Id, time)
@@ -100,10 +100,10 @@ namespace Iot.Device.Nmea0183.Sentences
             if (Valid)
             {
                 StringBuilder sb = new StringBuilder();
-                sb.Append(Starboard.ToString("F1", CultureInfo.InvariantCulture) + ",A,");
+                sb.Append(Starboard.Degrees.ToString("F1", CultureInfo.InvariantCulture) + ",A,");
                 if (Port.HasValue)
                 {
-                    sb.Append(Port.Value.ToString("F1", CultureInfo.InvariantCulture) + ",A");
+                    sb.Append(Port.Value.Degrees.ToString("F1", CultureInfo.InvariantCulture) + ",A");
                 }
                 else
                 {

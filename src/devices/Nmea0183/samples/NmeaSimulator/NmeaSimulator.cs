@@ -3,10 +3,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Linq;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Threading;
 using Iot.Device;
@@ -16,12 +18,14 @@ using Iot.Device.Nmea0183.Sentences;
 using Iot.Device.Seatalk1;
 using UnitsNet;
 using CommandLine;
+using Microsoft.Extensions.Logging;
 
 namespace Nmea.Simulator
 {
     internal class Simulator
     {
         private static readonly TimeSpan UpdateRate = TimeSpan.FromMilliseconds(500);
+        private readonly SimulatorArguments _arguments;
         private Thread? _simulatorThread;
         private bool _terminate;
         private SimulatorData _activeData;
@@ -30,11 +34,12 @@ namespace Nmea.Simulator
         private SeatalkToNmeaConverter? _seatalkInterface;
         private Random _random;
 
-        public Simulator()
+        public Simulator(SimulatorArguments arguments)
         {
             _activeData = new SimulatorData();
             ReplayFiles = new List<string>();
             _random = new Random();
+            _arguments = arguments;
         }
 
         private List<string> ReplayFiles
@@ -64,7 +69,21 @@ namespace Nmea.Simulator
                 return 1;
             }
 
-            var sim = new Simulator();
+            if (parsed.Value.Debug)
+            {
+                Console.WriteLine("Waiting for debugger...");
+                while (!Debugger.IsAttached)
+                {
+                    Thread.Sleep(100);
+                }
+            }
+
+            if (parsed.Value.Verbose)
+            {
+                LogDispatcher.LoggerFactory = new SimpleConsoleLoggerFactory(LogLevel.Trace);
+            }
+
+            var sim = new Simulator(parsed.Value);
             if (!string.IsNullOrWhiteSpace(parsed.Value.ReplayFiles))
             {
                 var wildCards = parsed.Value.ReplayFiles;
@@ -73,12 +92,12 @@ namespace Nmea.Simulator
                 sim.ReplayFiles.AddRange(Directory.GetFiles(path, fi.Name));
             }
 
-            sim.StartServer(parsed.Value.SeatalkInterface);
+            sim.StartServer();
 
             return 0;
         }
 
-        private void StartServer(string seatalk)
+        private void StartServer()
         {
             _tcpServer = null;
             _udpServer = null;
@@ -98,21 +117,56 @@ namespace Nmea.Simulator
                     _simulatorThread.Start();
                 }
 
-                _tcpServer = new NmeaTcpServer("TcpServer");
+                _tcpServer = new NmeaTcpServer("TcpServer", IPAddress.Any, _arguments.TcpPort);
                 _tcpServer.StartDecode();
                 _tcpServer.OnNewSequence += OnNewSequenceFromServer;
 
+                // This code block tries to determine the broadcast address of the local master ethernet adapter.
+                // This needs adjustment if the main adapter is a WIFI port.
+                string broadcastAddress = "255.255.255.255";
+                var interfaces = NetworkInterface.GetAllNetworkInterfaces();
+                foreach (var a in interfaces)
+                {
+                    if (a.OperationalStatus == OperationalStatus.Up && a.NetworkInterfaceType == NetworkInterfaceType.Ethernet)
+                    {
+                        var properties = a.GetIPProperties();
+                        foreach (var unicast in properties.UnicastAddresses)
+                        {
+                            if (unicast.Address.AddressFamily == AddressFamily.InterNetwork)
+                            {
+                                byte[] ipBytes = unicast.Address.GetAddressBytes();
+                                // A virtual address usually looks like a router address, that means it's last part is .1
+                                if (ipBytes[3] == 1)
+                                {
+                                    continue;
+                                }
+
+                                byte[] maskBytes = unicast.IPv4Mask.GetAddressBytes();
+                                for (int i = 0; i < ipBytes.Length; i++)
+                                {
+                                    // Make all bits 1 that are NOT set in the mask
+                                    ipBytes[i] |= (byte)~maskBytes[i];
+                                }
+
+                                broadcastAddress = new IPAddress(ipBytes).ToString();
+                            }
+                        }
+
+                        break;
+                    }
+                }
+
                 // Outgoing port is 10110, the incoming port is irrelevant (but we choose it differently here, so that a
                 // receiver can bind to 10110 on the same computer)
-                _udpServer = new NmeaUdpServer("UdpServer", 10111, 10110);
+                _udpServer = new NmeaUdpServer("UdpServer", _arguments.UdpPort, _arguments.UdpPort, broadcastAddress);
                 _udpServer.StartDecode();
                 _udpServer.OnNewSequence += OnNewSequenceFromServer;
 
                 // Also optionally directly connect to the Seatalk1 bus.
                 // For simplicity, this example is not using a MessageRouter.
-                if (!string.IsNullOrWhiteSpace(seatalk))
+                if (!string.IsNullOrWhiteSpace(_arguments.SeatalkInterface))
                 {
-                    _seatalkInterface = new SeatalkToNmeaConverter("Seatalk1", seatalk);
+                    _seatalkInterface = new SeatalkToNmeaConverter("Seatalk1", _arguments.SeatalkInterface);
                     _seatalkInterface.OnNewSequence += SeatalkNewSequence;
                     _seatalkInterface.SentencesToTranslate.Add(SentenceId.Any);
                     _seatalkInterface.StartDecode();
@@ -205,6 +259,15 @@ namespace Nmea.Simulator
                 SeaSmartEngineDetail detail = new SeaSmartEngineDetail(engineData);
                 SendSentence(detail);
 
+                GeographicPosition target = new GeographicPosition(47.54, 9.48, 0);
+                GreatCircle.DistAndDir(data.Position, target, out var distance, out var direction);
+                Speed vmg = Math.Cos(AngleExtensions.Difference(data.Course, direction).Radians) * data.SpeedOverGround;
+                Length xtError = Length.FromNauticalMiles(0.2);
+                var rmb = new RecommendedMinimumNavToDestination(zda.DateTime, xtError, "Start", "FH", target, distance, direction, vmg, false);
+                SendSentence(rmb);
+
+                var xte = new CrossTrackError(xtError);
+                SendSentence(xte);
                 // Test Seatalk message (understood by some OpenCPN plugins)
                 ////RawSentence sentence = new RawSentence(new TalkerId('S', 'T'), new SentenceId("ALK"), new string[]
                 ////{
@@ -260,6 +323,7 @@ namespace Nmea.Simulator
         private void FilePlayback()
         {
             NmeaLogDataReader rd = new NmeaLogDataReader("LogDataReader", ReplayFiles);
+            rd.Loop = _arguments.Loop;
             rd.DecodeInRealtime = true;
             rd.OnNewSequence += (source, sentence) => SendSentence(sentence);
             rd.StartDecode();
